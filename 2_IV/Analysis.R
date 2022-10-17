@@ -1,10 +1,11 @@
 library(tidyverse)
 options(dplyr.summarise.inform = FALSE) ## Add to .Rprofile to make permanent
 
-# Questions for bestie Ian
 
 
-data_dir = "/Users/pablo/Dropbox/2_PhD/3rd_year/771_Health_II/Health_Econ_Assignments/Data"
+### 0) Read and Clean Data
+
+data_dir = "../Data"
 
 # PUF: Medicare spending of each physician and service
 name_puf_yearly = list.files(path=paste0(data_dir, "/PUF"), pattern="*.txt", recursive=TRUE)
@@ -30,21 +31,20 @@ for (y in 1:length(name_puf_yearly)){
   # Read MDPPAS for every year
   mdppas_yearly = read_csv(paste0(data_dir, "/MDPPAS/", name_mdppas))
 
-  # Read PFS for every year
-  pfs_yearly = pfs %>% filter(year == year_num)
-
   # Read PUF for each year
   puf_yearly = read_tsv(paste0(data_dir, "/PUF/", name_puf))
   names(puf_yearly) = tolower(names(puf_yearly))
 
   # For years > 2013, use only MD not integrated in 2012
   if (year_num == 2012){
+    pfs_yearly = pfs %>% filter(year == year_num)
     puf_yearly = puf_yearly %>%
       filter(
         grepl("MD", nppes_credentials) |
           grepl("M.D", nppes_credentials) |
           grepl("M..D", nppes_credentials))
   } else {
+    pfs_yearly = pfs %>% filter(year == 2013)
     puf_yearly = puf_yearly %>% filter(npi %in% MD_not_int$npi)
   }
 
@@ -104,59 +104,95 @@ for (y in 1:length(name_puf_yearly)){
 
 # Append all datasets, remove missing values, and remove other stuff
 puf <- bind_rows(datalist)
-# puf = puf %>% filter(!is.na(integration))
-rm(datalist, MD_data, MD_int, puf_yearly, mdppas_yearly, year_num)
+rm(datalist, MD_data, MD_not_int, MD_int, pfs, price_shock,
+   puf_yearly, pfs_yearly, mdppas_yearly, tax_base, year_num)
 
-# OLS: log(claims) ~ integration
+
+
+### 1) Descriptive Statistics
+library(stargazer)
+sum_stats = puf %>%
+  select(Year=year, Spending=medicare_spending, Claims=claims, Patients=patients) %>%
+  pivot_longer(c(Spending, Claims, Patients), names_to="Variable", values_to="Value") %>%
+  group_by(Variable, Year) %>%
+  summarize(
+    Mean = round(mean(Value)),
+    SD = round(sd(Value)),
+    Min = round(min(Value)),
+    Max = round(max(Value)))
+stargazer(sum_stats, summary=FALSE, rownames=FALSE, out="tables/summary_stats.tex")
+
+
+
+### 3) OLS: log(claims) ~ integration
 library(fixest)
+puf = puf %>% filter(!is.na(integration))
+puf = puf %>% filter(!is.na(practice_rev_change))
 puf$lclaims = log(puf$claims)
-res = feols(lclaims ~ integration | npi + year, puf)
-etable(res)
-
-# Robustness Checks for Omitted Variable Bias
-library(robomit)
-delta_list = c(0, 0.5, 1, 1.5, 2)
-R2max_list = c(0.5, 0.6, 0.7, 0.8, 0.9, 1)
-
-# puf_dummy = puf %>%
-#   mutate(var = 1) %>%
-#   spread(npi, var, fill = 0, sep = "_") %>%
-#   left_join(puf)
-
-o_beta("lclaims", "integration", con="year", id="npi", time="year",
-       delta=1, R2max=1, type="lm", data=puf)
-
-# o_beta("lclaims", "integration", con="npi + year", id="npi", time="year",
-#        delta=1, R2max=1, type="lm", data=puf)
-#
-# for (delta in delta_list){
-#   for (R2max in R2max_list){
-#     o_beta("lclaims", "integration", con="npi + year", id="npi", time="year",
-#            delta=delta, R2max=R2max, type="lm", data=puf)
-#   }
-# }
+est_X = feols(lclaims ~ integration | npi + year, puf)
+etable(est_X, label="tab:summary", file="tables/ols_integration.tex")
 
 
 
-# IV: log(claims) ~ (integration ~ rev_change)
-est_iv = feols(lclaims ~ 1 | npi + year | integration ~ practice_rev_change, puf)
-est_iv
+### 4) Robustness Checks for Omitted Variable Bias
+est_X = feols(lclaims ~ integration | npi + year, puf)
+est = feols(lclaims ~ integration, puf)
+delta_list = c(0.5, 1, 1.5, 2)
+R2max_list = c(0.5, 0.7, 0.9, 1)
+df_beta = data.frame(matrix(ncol = length(R2max_list), nrow = length(delta_list)))
+colnames(df_beta) = R2max_list
+rownames(df_beta) = delta_list
+
+o_beta = function(est_DX, est_D, delta=1, R2max=1){
+  coef_DX = est_DX$coefficients[[1]]
+  R2_DX = est_DX$sq.cor[[1]]
+  coef_D = est_D$coefficients[[2]]
+  R2_D = est_D$sq.cor[[1]]
+  coef_st = coef_DX - delta*(coef_D-coef_DX)*(R2max-R2_DX)/(R2_DX - R2_D)
+  return(c(round(coef_DX, 2), round(coef_st, 2)))
+}
+
+for (delta in delta_list){
+  for (R2max in R2max_list){
+    df_beta[toString(delta), toString(R2max)] = paste0("[",
+                                                       toString(o_beta(est_X, est, delta, R2max)),
+                                                       "]")
+  }
+}
+
+stargazer(df_beta, summary=FALSE, out="tables/beta_sensitivity.tex")
 
 
-# Durbin-Wu-Hausman test with an augmented regression
-res_fs = feols(integration ~ practice_rev_change | npi + year, puf)$residuals
-est_dwh = feols(lclaims ~ integration + res_fs | npi + year, puf)
-est_dwh
+
+### 5) IV: log(claims) ~ (integration ~ rev_change)
+est_IV = feols(lclaims ~ 1 | npi + year | integration ~ practice_rev_change, puf)
+etable(summary(est_IV, stage = 1:2),
+       fitstat = ~ . + ivfall + ivwaldall.p, se.below = TRUE,
+       file = "tables/iv_integration.tex")
 
 
 
+### 6) Durbin-Wu-Hausman test
+# est_resid = feols(integration ~ practice_rev_change | npi + year, puf)
+# puf$z_residuals = est_resid$residuals
+# est_DWH = feols(lclaims ~ practice_rev_change + z_residuals | npi + year, puf)
+# etable(est_DWH)
+est_IV
 
 
 
+### 7) Anderson-Rubin test
+est_AR = feols(lclaims ~ practice_rev_change | npi + year, puf)
+est_AR
+# Since the F-stat > 100, we do not need to adjust
 
 
 
-
+### 8) Shift-share instrument
+puf$random_rev_change = rowMeans(replicate(100, sample(puf$practice_rev_change)))
+puf$center_rev_change = puf$practice_rev_change - puf$random_rev_change
+est_SS = feols(lclaims ~ 1 | npi + year | integration ~ center_rev_change, puf)
+etable(est_SS, se.below = TRUE, file="tables/ssiv_integration.tex")
 
 
 
