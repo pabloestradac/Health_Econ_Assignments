@@ -70,7 +70,7 @@ for (y in 1:length(name_puf_yearly)){
     inner_join(tax_base, by="npi") %>%
     inner_join(pfs_yearly %>%
                  select(hcpcs, dprice_rel_2010, price_nonfac_orig_2010, price_nonfac_orig_2007),
-               by=c("hcpcs_code" = "hcpcs")) %>%
+                 by=c("hcpcs_code" = "hcpcs")) %>%
     mutate_at(vars(dprice_rel_2010, price_nonfac_orig_2010, price_nonfac_orig_2007), replace_na, 0) %>%
     mutate(price_shock = case_when(
       year_num <= 2013 ~ ((year_num-2009)/4)*dprice_rel_2010,
@@ -103,7 +103,7 @@ for (y in 1:length(name_puf_yearly)){
 }
 
 # Append all datasets, remove missing values, and remove other stuff
-puf <- bind_rows(datalist)
+puf = bind_rows(datalist)
 rm(datalist, MD_data, MD_not_int, MD_int, pfs, price_shock,
    puf_yearly, pfs_yearly, mdppas_yearly, tax_base, year_num)
 
